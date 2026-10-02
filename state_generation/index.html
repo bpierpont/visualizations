@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>U.S. State Electricity Generation Mix</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;600;700&display=swap" rel="stylesheet">
+<script src="generation_data.js"></script>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script src="https://unpkg.com/topojson-client@3/dist/topojson-client.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; font-family: 'Archivo', sans-serif; background: #f7f7f7; color: #0e0e0e; }
+  #app { display: flex; flex-direction: column; height: 100vh; }
+
+  /* Header */
+  #header { background: #2d2d2d; color: #fff; padding: 14px 24px; flex-shrink: 0; display: flex; align-items: baseline; gap: 16px; border-bottom: 1px solid #444; }
+  #header h1 { font-size: 18px; font-weight: 700; letter-spacing: -0.2px; }
+  #header span { font-size: 12px; color: #9ca3af; font-weight: 400; }
+
+  #main { display: flex; flex: 1; min-height: 0; }
+
+  /* Map panel */
+  #map-panel { width: 52%; background: #fff; border-right: 1px solid #ececec; display: flex; flex-direction: column; padding: 16px; }
+  #map-label { font-size: 11px; font-weight: 600; color: #5b5b5b; margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.8px; }
+  #map-svg-wrap { flex: 1; min-height: 0; }
+  #map-svg { width: 100%; height: 100%; }
+
+  /* Map */
+  .map-bg { fill: #e5e7eb; cursor: default; }
+  .state { fill: #aecee0; stroke: #fff; stroke-width: 0.8px; cursor: pointer; transition: fill 0.12s; }
+  .state:hover { fill: #6ea8c4; }
+  .state.selected { fill: #096498; }
+  .state.no-data { fill: #d3d3d3; cursor: default; }
+  .state-borders { fill: none; stroke: #fff; stroke-width: 0.5px; pointer-events: none; }
+
+  /* Chart panel */
+  #chart-panel { flex: 1; display: flex; flex-direction: column; padding: 16px; min-width: 0; }
+  #chart-header { flex-shrink: 0; margin-bottom: 6px; }
+  #chart-title { font-size: 20px; font-weight: 700; color: #0e0e0e; line-height: 1.2; }
+  #chart-sub { font-size: 12px; color: #5b5b5b; margin-top: 3px; }
+  #chart-wrap { flex: 1; min-height: 0; position: relative; }
+  #chart-svg { width: 100%; height: 100%; display: block; }
+
+  /* Legend */
+  #legend { flex-shrink: 0; display: flex; flex-wrap: wrap; gap: 8px 16px; margin-top: 10px; padding-top: 10px; border-top: 1px solid #ececec; }
+  .leg-item { display: flex; align-items: center; gap: 5px; font-size: 12px; color: #5b5b5b; }
+  .leg-swatch { width: 13px; height: 13px; border-radius: 2px; flex-shrink: 0; }
+
+  /* Tooltip */
+  #tooltip { position: fixed; background: rgba(14,14,14,0.94); color: #fff; padding: 8px 12px; border-radius: 4px; font-size: 11.5px; font-family: 'Archivo', sans-serif; pointer-events: none; opacity: 0; transition: opacity 0.08s; z-index: 100; line-height: 1.75; max-width: 260px; }
+
+  /* Chart chrome */
+  .axis line, .axis path { stroke: #e5e7eb; }
+  .axis text { fill: #5b5b5b; font-size: 11px; font-family: 'Archivo', sans-serif; }
+  .y-label { fill: #5b5b5b; font-size: 11px; font-family: 'Archivo', sans-serif; }
+  .hover-line { stroke: #0e0e0e; stroke-width: 1px; stroke-dasharray: 3 3; pointer-events: none; opacity: 0; }
+
+  @media (max-width: 768px) {
+    #main { flex-direction: column; }
+    #map-panel { width: 100%; flex: 1; min-height: 0; border-right: none; border-bottom: 1px solid #ececec; }
+    #chart-panel { min-height: 0; }
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="header">
+    <h1>U.S. State Electricity Generation Mix</h1>
+    <span id="date-range">Trailing 12-month totals &middot; Source: EIA</span>
+  </div>
+  <div id="main">
+    <div id="map-panel">
+      <div id="map-label">Select a state &mdash; click map background to reset</div>
+      <div id="map-svg-wrap"><svg id="map-svg"></svg></div>
+    </div>
+    <div id="chart-panel">
+      <div id="chart-header">
+        <div id="chart-title">United States</div>
+        <div id="chart-sub">Trailing 12-month electricity generation by fuel type (GWh) &mdash; sum of all states</div>
+      </div>
+      <div id="chart-wrap"><svg id="chart-svg"></svg></div>
+      <div id="legend"></div>
+    </div>
+  </div>
+</div>
+<div id="tooltip"></div>
+
+<script>
+const FUEL_ORDER  = ['Coal','OtherFossil','Petroleum','Gas','Nuclear','Hydro','OtherRenew','Wind','Solar','DistSolar'];
+const FUEL_COLORS = { Coal:'#525252', OtherFossil:'#888888', Petroleum:'#b0b0b0', Gas:'#d4d4d4', Nuclear:'#8b5cf6', Hydro:'#3b82f6', OtherRenew:'#6aab68', Wind:'#22c55e', Solar:'#facc15', DistSolar:'#d4860a' };
+const FUEL_LABELS = { Coal:'Coal', OtherFossil:'Other Fossil', Petroleum:'Petroleum', Gas:'Natural Gas', Nuclear:'Nuclear', Hydro:'Hydro', OtherRenew:'Other Renewable', Wind:'Wind', Solar:'Utility Solar', DistSolar:'Distributed Solar' };
+
+const FIPS = {
+  "01":"AL","02":"AK","04":"AZ","05":"AR","06":"CA","08":"CO","09":"CT","10":"DE","11":"DC",
+  "12":"FL","13":"GA","15":"HI","16":"ID","17":"IL","18":"IN","19":"IA","20":"KS","21":"KY",
+  "22":"LA","23":"ME","24":"MD","25":"MA","26":"MI","27":"MN","28":"MS","29":"MO","30":"MT",
+  "31":"NE","32":"NV","33":"NH","34":"NJ","35":"NM","36":"NY","37":"NC","38":"ND","39":"OH",
+  "40":"OK","41":"OR","42":"PA","44":"RI","45":"SC","46":"SD","47":"TN","48":"TX","49":"UT",
+  "50":"VT","51":"VA","53":"WA","54":"WV","55":"WI","56":"WY"
+};
+const STATE_NAMES = {
+  AL:"Alabama", AK:"Alaska", AZ:"Arizona", AR:"Arkansas", CA:"California", CO:"Colorado",
+  CT:"Connecticut", DE:"Delaware", DC:"Washington D.C.", FL:"Florida", GA:"Georgia",
+  HI:"Hawaii", ID:"Idaho", IL:"Illinois", IN:"Indiana", IA:"Iowa", KS:"Kansas",
+  KY:"Kentucky", LA:"Louisiana", ME:"Maine", MD:"Maryland", MA:"Massachusetts",
+  MI:"Michigan", MN:"Minnesota", MS:"Mississippi", MO:"Missouri", MT:"Montana",
+  NE:"Nebraska", NV:"Nevada", NH:"New Hampshire", NJ:"New Jersey", NM:"New Mexico",
+  NY:"New York", NC:"North Carolina", ND:"North Dakota", OH:"Ohio", OK:"Oklahoma",
+  OR:"Oregon", PA:"Pennsylvania", RI:"Rhode Island", SC:"South Carolina", SD:"South Dakota",
+  TN:"Tennessee", TX:"Texas", UT:"Utah", VT:"Vermont", VA:"Virginia", WA:"Washington",
+  WV:"West Virginia", WI:"Wisconsin", WY:"Wyoming"
+};
+
+const FUEL_MAP = {
+  'Coal':'Coal','Natural Gas':'Gas','Nuclear':'Nuclear','Hydro':'Hydro','Wind':'Wind',
+  'Utility Solar':'Solar','Distributed Solar':'DistSolar',
+  'Petroleum':'Petroleum','Other Fossil':'OtherFossil','Other Renewable':'OtherRenew',
+};
+
+// ── Parse SOURCE_CSV and compute rolling 12-month TTM ────────────
+const GENDATA = (function () {
+  const lines = SOURCE_CSV.replace(/\r/g, '').trim().split('\n');
+  const hdr   = lines[0].split(',');
+  const iType = hdr.indexOf('Type');
+  const iLoc  = hdr.indexOf('location');
+  const iPer  = hdr.indexOf('period');
+  const iGen  = hdr.indexOf('generation');
+
+  // One-pass aggregation: byState[state][period][fuelGroup] += gen
+  const byState = {};
+  for (let i = 1; i < lines.length; i++) {
+    const c      = lines[i].split(',');
+    const state  = c[iLoc]  && c[iLoc].trim();
+    const ftype  = c[iType] && c[iType].trim();
+    const period = c[iPer]  && c[iPer].trim();
+    const gen    = parseFloat(c[iGen]) || 0;
+    if (!state || !period || !ftype || state === 'US') continue;
+    const fg = FUEL_MAP[ftype];
+    if (!fg) continue;
+    if (!byState[state]) byState[state] = {};
+    const pd = byState[state];
+    if (!pd[period]) pd[period] = {};
+    pd[period][fg] = (pd[period][fg] || 0) + gen;
+  }
+
+  // Build US aggregate (sum of all states, excluding PR)
+  const usData = {};
+  for (const [state, pd] of Object.entries(byState)) {
+    if (state === 'PR') continue;
+    for (const [period, fuels] of Object.entries(pd))
+      for (const [fg, g] of Object.entries(fuels)) {
+        if (!usData[period]) usData[period] = {};
+        usData[period][fg] = (usData[period][fg] || 0) + g;
+      }
+  }
+  byState['_US'] = usData;
+
+  // Compute rolling TTM and build final structure
+  const result = {};
+  for (const [entity, periodData] of Object.entries(byState)) {
+    const allP = Object.keys(periodData).sort();
+    const ttmPeriods = [], ttmVals = {};
+    for (let i = 11; i < allP.length; i++) {
+      const p   = allP[i];
+      const w12 = allP.slice(i - 11, i + 1);
+      if (w12.length < 12) continue;
+      const ttm = {};
+      for (const wp of w12)
+        for (const [fg, g] of Object.entries(periodData[wp] || {}))
+          ttm[fg] = (ttm[fg] || 0) + g;
+      ttmPeriods.push(p);
+      ttmVals[p] = ttm;
+    }
+    const series = {};
+    for (const f of FUEL_ORDER) {
+      const vals = ttmPeriods.map(p => Math.round((ttmVals[p][f] || 0) / 10) * 10);
+      if (vals.some(v => v > 0)) series[f] = vals;
+    }
+    if (ttmPeriods.length) result[entity] = { periods: ttmPeriods, series };
+  }
+  return result;
+})();
+
+// Stamp date range in header
+(function () {
+  const us = GENDATA['_US'];
+  if (!us) return;
+  const fmt = d3.timeFormat('%b %Y'), parse = d3.timeParse('%Y-%m');
+  const ps  = us.periods;
+  document.getElementById('date-range').textContent =
+    `Trailing 12-month totals · EIA data, ${fmt(parse(ps[0]))} – ${fmt(parse(ps[ps.length - 1]))}`;
+})();
+
+// ── Tooltip ───────────────────────────────────────────────────────
+const tipEl = document.getElementById('tooltip');
+function showTip(html, cx, cy) {
+  tipEl.innerHTML = html;
+  tipEl.style.opacity = '1';
+  const tw = tipEl.offsetWidth, th = tipEl.offsetHeight;
+  const vw = window.innerWidth,  vh = window.innerHeight;
+  let lx = cx + 14, ly = cy - 10;
+  if (lx + tw > vw - 8) lx = cx - tw - 14;
+  if (ly + th > vh - 8) ly = vh - th - 8;
+  tipEl.style.left = lx + 'px';
+  tipEl.style.top  = ly + 'px';
+}
+function hideTip() { tipEl.style.opacity = '0'; }
+
+// ── Legend ────────────────────────────────────────────────────────
+const legEl = document.getElementById('legend');
+[...FUEL_ORDER].reverse().forEach(f => {
+  const d = document.createElement('div');
+  d.className = 'leg-item';
+  d.innerHTML = `<div class="leg-swatch" style="background:${FUEL_COLORS[f]}"></div><span>${FUEL_LABELS[f]}</span>`;
+  legEl.appendChild(d);
+});
+
+// ── Chart helpers ─────────────────────────────────────────────────
+const parseM   = d3.timeParse('%Y-%m');
+const fmtMonth = d3.timeFormat('%b %Y');
+function fmtGWh(v) {
+  if (v >= 1e6) return (v / 1e6).toFixed(1) + 'M';
+  if (v >= 1e3) return (v / 1e3).toFixed(0) + 'k';
+  return v.toFixed(0);
+}
+
+let currentKey = '_US';
+
+function showChart(key) {
+  currentKey = key;
+  const sd    = GENDATA[key];
+  if (!sd) return;
+  const isUS  = key === '_US';
+  document.getElementById('chart-title').textContent = isUS ? 'United States' : (STATE_NAMES[key] || key);
+  document.getElementById('chart-sub').textContent   = isUS
+    ? 'Trailing 12-month electricity generation by fuel type (GWh) — sum of all states'
+    : 'Trailing 12-month electricity generation by fuel type (GWh)';
+  drawChart(sd);
+}
+
+function drawChart(sd) {
+  const fuels   = FUEL_ORDER.filter(f => sd.series[f]);
+  const periods = sd.periods.map(parseM);
+
+  const wrap  = document.getElementById('chart-wrap');
+  const svgEl = document.getElementById('chart-svg');
+  d3.select(svgEl).selectAll('*').remove();
+
+  const W = wrap.clientWidth, H = wrap.clientHeight;
+  const m = { top: 18, right: 18, bottom: 48, left: 68 };
+  const iW = W - m.left - m.right, iH = H - m.top - m.bottom;
+  const svg = d3.select(svgEl).attr('viewBox', `0 0 ${W} ${H}`);
+  const g   = svg.append('g').attr('transform', `translate(${m.left},${m.top})`);
+
+  const rows = periods.map((p, i) => {
+    const r = { period: p };
+    fuels.forEach(f => { r[f] = sd.series[f][i] || 0; });
+    return r;
+  });
+
+  const stack  = d3.stack().keys(fuels).order(d3.stackOrderNone);
+  const series = stack(rows);
+
+  const x = d3.scaleTime().domain(d3.extent(periods)).range([0, iW]);
+  const y = d3.scaleLinear()
+    .domain([0, d3.max(series, s => d3.max(s, d => d[1]))])
+    .nice().range([iH, 0]);
+
+  const area = d3.area()
+    .x(d => x(d.data.period))
+    .y0(d => y(d[0])).y1(d => y(d[1]))
+    .curve(d3.curveMonotoneX);
+
+  g.selectAll('.area').data(series).join('path')
+    .attr('class', 'area').attr('d', area)
+    .attr('fill', d => FUEL_COLORS[d.key]).attr('opacity', 0.92);
+
+  g.append('g').attr('class', 'axis')
+    .attr('transform', `translate(0,${iH})`)
+    .call(d3.axisBottom(x).ticks(d3.timeYear.every(2)).tickFormat(d3.timeFormat('%Y')))
+    .selectAll('text').style('font-size', '11px');
+
+  g.append('g').attr('class', 'axis')
+    .call(d3.axisLeft(y).ticks(6).tickFormat(fmtGWh));
+
+  g.append('text').attr('class', 'y-label')
+    .attr('transform', 'rotate(-90)').attr('x', -iH / 2).attr('y', -52)
+    .attr('text-anchor', 'middle').text('GWh  (trailing 12 months)');
+
+  const hLine = g.append('line').attr('class', 'hover-line').attr('y1', 0).attr('y2', iH);
+  g.append('rect')
+    .attr('fill', 'transparent').attr('width', iW).attr('height', iH)
+    .on('mousemove', function (event) {
+      const [mx] = d3.pointer(event);
+      const i = d3.minIndex(periods, p => Math.abs(p - x.invert(mx)));
+      hLine.attr('x1', x(periods[i])).attr('x2', x(periods[i])).attr('opacity', 1);
+      const total = fuels.reduce((s, f) => s + (sd.series[f][i] || 0), 0);
+      let html = `<strong>${fmtMonth(periods[i])}</strong><br>`;
+      [...fuels].reverse().forEach(f => {
+        const v = sd.series[f][i] || 0;
+        if (!v) return;
+        const pct = total > 0 ? (v / total * 100).toFixed(1) : '0.0';
+        html += `<span style="display:inline-block;width:9px;height:9px;background:${FUEL_COLORS[f]};border-radius:2px;margin-right:4px;vertical-align:middle"></span>`
+              + `${FUEL_LABELS[f]}: <strong>${fmtGWh(v)}</strong> GWh (${pct}%)<br>`;
+      });
+      html += `<strong>Total: ${fmtGWh(total)} GWh</strong>`;
+      showTip(html, event.clientX, event.clientY);
+    })
+    .on('mouseout', () => { hLine.attr('opacity', 0); hideTip(); });
+}
+
+// ── Map ───────────────────────────────────────────────────────────
+const mapWrap  = document.getElementById('map-svg-wrap');
+const mapSvgEl = document.getElementById('map-svg');
+
+function resetToUS(svg) {
+  svg.selectAll('path.state').classed('selected', false);
+  showChart('_US');
+}
+
+fetch('https://cdn.jsdelivr.net/npm/us-atlas@3/states-10m.json')
+  .then(r => r.json())
+  .then(us => {
+    const W = mapWrap.clientWidth, H = mapWrap.clientHeight;
+    const proj = d3.geoAlbersUsa().fitSize([W, H], topojson.feature(us, us.objects.states));
+    const path = d3.geoPath().projection(proj);
+    const svg  = d3.select(mapSvgEl).attr('viewBox', `0 0 ${W} ${H}`);
+
+    // Background rect — click to reset to US total
+    svg.append('rect')
+      .attr('class', 'map-bg').attr('width', W).attr('height', H)
+      .on('click', () => resetToUS(svg));
+
+    svg.selectAll('path.state')
+      .data(topojson.feature(us, us.objects.states).features)
+      .join('path')
+      .attr('class', d => {
+        const a = FIPS[String(d.id).padStart(2, '0')];
+        return 'state' + (a && GENDATA[a] ? '' : ' no-data');
+      })
+      .attr('d', path)
+      .on('mouseover', function (event, d) {
+        const a = FIPS[String(d.id).padStart(2, '0')];
+        if (a) showTip(`<strong>${STATE_NAMES[a] || a}</strong>`, event.clientX, event.clientY);
+      })
+      .on('mousemove', event => {
+        tipEl.style.left = (event.clientX + 14) + 'px';
+        tipEl.style.top  = (event.clientY - 10) + 'px';
+      })
+      .on('mouseout', hideTip)
+      .on('click', function (event, d) {
+        event.stopPropagation();
+        const a = FIPS[String(d.id).padStart(2, '0')];
+        if (!a || !GENDATA[a]) return;
+        svg.selectAll('path.state').classed('selected', false);
+        d3.select(this).classed('selected', true);
+        showChart(a);
+      });
+
+    svg.append('path')
+      .datum(topojson.mesh(us, us.objects.states, (a, b) => a !== b))
+      .attr('class', 'state-borders').attr('d', path);
+  })
+  .catch(() => {
+    document.getElementById('map-svg-wrap').innerHTML =
+      '<p style="padding:12px;font-size:13px;color:#e53e3e">Map requires internet access to load.</p>';
+  });
+
+// Default view
+showChart('_US');
+</script>
+</body>
+</html>
